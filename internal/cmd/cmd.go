@@ -6,7 +6,9 @@ import (
 	"delay-notice/internal/dao"
 	"delay-notice/utility/auto_create_table"
 	notice2 "delay-notice/utility/notice"
+	"github.com/marcellowy/go-common/gogf/config"
 	"github.com/marcellowy/go-common/gogf/middleware"
+	"github.com/marcellowy/go-common/gogf/vlog"
 	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -41,11 +43,22 @@ var (
 			dao.CreateTable(ctx)
 
 			// 启动处理通知协程
-			timer := notice2.Timer{
-				PoolSize:       10,
-				ScanDbInterval: time.Second * 2,
+			{
+				i := config.Get("notice.processDataGoroutine").Int()
+				if i <= 0 {
+					i = 5
+				}
+				vlog.Info(ctx, "processDataGoroutine: ", i)
+
+				sdInterval := time.Duration(config.Get("notice.scanDatabaseInterval").Int32()) * time.Second
+				vlog.Info(ctx, "scanDatabaseInterval: ", sdInterval.String())
+
+				timer := notice2.Timer{
+					PoolSize:       i,
+					ScanDbInterval: sdInterval,
+				}
+				timer.Start(ctx)
 			}
-			timer.Start(ctx)
 
 			s.Run()
 			return nil

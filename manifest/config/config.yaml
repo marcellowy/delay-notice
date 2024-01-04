@@ -1,0 +1,29 @@
+server:
+  address:     ":8000"
+  openapiPath: "/api.json"
+  swaggerPath: "/swagger"
+
+logger:
+  level : "info"
+  stdout: true
+  path: "."
+  file: "delay_notice.log"
+  rotateSize: 10240000
+  rotateBackupLimit: 3
+
+notice:
+  # 扫描数据库间隔,单位: 秒
+  scanDatabaseInterval: 2
+  # 处理数据线程数量
+  processDataGoroutine: 10
+  # 处理兜底间隔,单位: 秒
+  reconciliationInterval: 30
+
+database:
+  host: '127.0.0.1'
+  port: 3306
+  user: 'root'
+  pwd: '1234'
+  dbName: 'db_notice'
+  debug: false
+
