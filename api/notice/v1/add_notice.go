@@ -16,7 +16,7 @@ type AddNoticeReq struct {
 	Http          *HttpNotice `json:"http"`          // http通知方法
 	Delay         int32       `json:"delay"`         // 延迟多久,单位:秒
 	RetryTimes    int32       `json:"retry_times"`   // 通知失败时重试几次
-	RetryInterval int32       `json:"retryInterval"` // 通知失败时重试间隔,单位:秒
+	RetryInterval int32       `json:"retryInterval"` // 通知失败时重试间隔,单位:秒,重试间隔建议不超过1分钟
 	Data          string      `json:"data"`          // 通知时原样返回的数据
 }
 

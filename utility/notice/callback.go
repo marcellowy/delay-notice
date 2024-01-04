@@ -17,10 +17,8 @@ import (
 	"time"
 )
 
-// Callback 处理回调业务
-func Callback(ctx context.Context, noticeId string) {
-
-	// TODO: 这里可以增加分布式锁，按id进行排他
+// Cb 回调方法
+func Cb(ctx context.Context, noticeId string) {
 
 	var row = entity.Notice{NoticeId: noticeId}
 	nt := row.GetNoticeTIName()
@@ -39,76 +37,36 @@ func Callback(ctx context.Context, noticeId string) {
 		return
 	}
 
-	// 状态检查
-	// 0:等待被通知 1:通知成功 2:通知失败 3:正在执行通知
-	if row.Status == 3 && row.RealRetryTimes > row.RetryTimes {
-		// 通知失败,也达到了最大次数,就不处理
-		{
-			row.Status = 2
-			row.StatusDesc = "超过最大重试次数"
-
-			// 更新到数据库
-			if err = dao.DB.Table(nt.TableName).Updates(&row).Error; err != nil {
-				vlog.Error(ctx, err)
-			}
-		}
-		vlog.Warningf(ctx, "status=2 and %d>=%d; skip", row.RealRetryTimes, row.RetryTimes)
-		return
+	var bn = &BizNotice{
+		Notice: &row,
+		Timer: &entity.NoticeTimer{
+			NoticeId: row.NoticeId,
+		},
 	}
 
-	if row.Status == 1 {
-		// 已经通知成功,也不处理
-		vlog.Warningf(ctx, "status=1 skip")
-		return
-	}
+	vlog.Debug(ctx, "begin process via biz notice")
+	bn.Process(ctx)
+}
 
-	var desc string
-	var now = time.Now()
-	row.RealNoticeTime = &now
-	if desc, err = SendCallback(ctx, &row); err != nil {
-		// 通知失败
-		row.Status = 3
-		row.StatusDesc = fmt.Sprintf("通知失败: %s", err.Error())
-		row.RealRetryTimes = row.RealRetryTimes + 1
-	} else {
-		row.Status = 1
-		row.StatusDesc = fmt.Sprintf("通知成功: %s", desc)
-	}
-
-	// 更新到数据库
-	if err = dao.DB.Table(nt.TableName).Updates(&row).Error; err != nil {
-		vlog.Error(ctx, err)
-	}
-
-	if row.Status == 1 {
-		// 如果处理成功通知,就删除timer的数据
-		TimerDataSuccess <- row.NoticeId
-	} else if row.Status == 3 {
-		// 如果处理失败,放回队列继续处理，直到超过最大重试次数弹出
-		// PoolData <- row.NoticeId
-		TimerDataFailed <- &row
-	}
-
-	vlog.Infof(ctx, row.StatusDesc)
-	vlog.Infof(ctx, "process notice id %s success", noticeId)
+type BizNotice struct {
+	Notice *entity.Notice
+	Timer  *entity.NoticeTimer
 }
 
 // SendCallback 发送回调
-func SendCallback(ctx context.Context, notice *entity.Notice) (string, error) {
-
-	switch notice.Type {
+func (bn *BizNotice) SendCallback(ctx context.Context) (string, error) {
+	switch bn.Notice.Type {
 	case "http", "https":
-		return SendHttpCallback(ctx, notice)
+		return bn.SendHttpCallback(ctx)
 	}
-
-	return "", fmt.Errorf("not support type: %s", notice.Type)
+	return "", fmt.Errorf("not support type: %s", bn.Notice.Type)
 }
 
-// SendHttpCallback 发送http回调
-func SendHttpCallback(ctx context.Context, notice *entity.Notice) (string, error) {
+// SendHttpCallback 发送 http 请求
+func (bn *BizNotice) SendHttpCallback(ctx context.Context) (string, error) {
 
 	var hn = v1.HttpNotice{}
-	if err := json.Unmarshal([]byte(notice.TypeData), &hn); err != nil {
+	if err := json.Unmarshal([]byte(bn.Notice.TypeData), &hn); err != nil {
 		vlog.Error(ctx, err)
 		return "", err
 	}
@@ -119,7 +77,7 @@ func SendHttpCallback(ctx context.Context, notice *entity.Notice) (string, error
 			client = client.SetHeader(k, v)
 		}
 	}
-	response, err := client.Post(ctx, hn.Url, notice.Data)
+	response, err := client.Post(ctx, hn.Url, bn.Notice.Data)
 	if err != nil {
 		vlog.Error(ctx, err)
 		return "", err
@@ -138,4 +96,81 @@ func SendHttpCallback(ctx context.Context, notice *entity.Notice) (string, error
 	}
 
 	return string(b), nil
+}
+
+// Process 开始处理
+func (bn *BizNotice) Process(ctx context.Context) {
+
+	if bn.Notice.Status == int32(v1.NoticeStatusSuccess) {
+		// 已经通知成功的数据
+		vlog.Warningf(ctx, "status = 1, skip")
+		return
+	}
+
+	var desc, err = bn.SendCallback(ctx)
+	if err == nil {
+		bn.Notice.Status = int32(v1.NoticeStatusSuccess)
+		bn.Notice.StatusDesc = fmt.Sprintf("通知成功: %s", desc)
+
+		bn.Timer.Status = 1
+		_ = bn.UpdateStatus(ctx)
+		return
+	}
+
+	// 通知失败
+	bn.Notice.Status = int32(v1.NoticeStatusDoing)
+	bn.Notice.StatusDesc = fmt.Sprintf("通知失败: %s", err.Error())
+	bn.Notice.RealRetryTimes = bn.Notice.RealRetryTimes + 1
+
+	if bn.Notice.RealRetryTimes > bn.Notice.RetryTimes {
+		// 达到了最大重试次数
+		bn.Notice.Status = int32(v1.NoticeStatusFailed)
+		bn.Notice.StatusDesc = "超过最大重试次数"
+		bn.Timer.Status = 1
+
+		_ = bn.UpdateStatus(ctx)
+		return
+	}
+
+	bn.Timer.Status = 0
+	bn.Timer.PrepareNoticeTime = time.Now().Add(time.Second * time.Duration(bn.Notice.RetryInterval))
+
+	_ = bn.UpdateStatus(ctx)
+	return
+}
+
+// UpdateStatus 事务更新状态
+func (bn *BizNotice) UpdateStatus(ctx context.Context) error {
+
+	nt := bn.Notice.GetNoticeTIName()
+
+	return dao.DB.Transaction(func(tx *gorm.DB) (err error) {
+
+		err = tx.Table(nt.TableName).Where("notice_id = ?", bn.Notice.NoticeId).Updates(map[string]interface{}{
+			"status":           bn.Notice.Status,
+			"status_desc":      bn.Notice.StatusDesc,
+			"real_retry_times": bn.Notice.RealRetryTimes,
+		}).Error
+
+		if err != nil {
+			vlog.Error(ctx, err)
+			return err
+		}
+
+		if bn.Timer.Status == 1 {
+			err = tx.Unscoped().Where("notice_id = ?", bn.Notice.NoticeId).Delete(&entity.NoticeTimer{}).Error
+		} else {
+			err = tx.Model(&entity.NoticeTimer{}).Where("notice_id = ?", bn.Notice.NoticeId).Updates(map[string]interface{}{
+				"status":              bn.Timer.Status,
+				"prepare_notice_time": bn.Timer.PrepareNoticeTime,
+			}).Error
+		}
+
+		if nil != err {
+			vlog.Error(ctx, err)
+			return err
+		}
+
+		return nil
+	})
 }

@@ -7,6 +7,7 @@ import (
 	"delay-notice/utility/auto_create_table"
 	notice2 "delay-notice/utility/notice"
 	"github.com/marcellowy/go-common/gogf/middleware"
+	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/net/ghttp"
@@ -40,7 +41,11 @@ var (
 			dao.CreateTable(ctx)
 
 			// 启动处理通知协程
-			notice2.Start(ctx)
+			timer := notice2.Timer{
+				PoolSize:       10,
+				ScanDbInterval: time.Second * 2,
+			}
+			timer.Start(ctx)
 
 			s.Run()
 			return nil
