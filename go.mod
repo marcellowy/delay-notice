@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/gogf/gf/v2 v2.5.7
-	github.com/marcellowy/go-common v0.0.9
+	github.com/marcellowy/go-common v0.0.10
 	gorm.io/gorm v1.25.1
 )
 
